@@ -3,6 +3,14 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
+# Device detection: supports CUDA, Apple Silicon (MPS), and CPU
+device = 'cpu'
+if torch.cuda.is_available():
+    device = 'cuda'
+elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+    device = 'mps'
+print("using device:", device)
+
 
 class CausalSelfAttention(nn.Module):
     def __init__(self, config):
@@ -55,7 +63,7 @@ class Block(nn.Module):
         self.ln_1 = nn.LayerNorm(config.n_embd)
         self.attn = CausalSelfAttention(config)
         self.ln_2 = nn.LayerNorm(config.n_embd)
-        self.mlp = MPL(config)
+        self.mlp = MLP(config)
 
     def forward(self, x):
         x = x + self.attn(self.ln_1(x))
@@ -76,12 +84,12 @@ class GPT(nn.Module):
         super().__init__()
         self.config = config
 
-        self.transformer = nn.ModuleDict(
-            wte = nn.Embedding(config.vocab_size, config.n_embd),
-            wpe = nn.Embedding(config.block_size, config.n_embd),
-            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-            ln_f = nn.LayerNorm(config.n_embd),
-        )
+        self.transformer = nn.ModuleDict({
+            'wte': nn.Embedding(config.vocab_size, config.n_embd),
+            'wpe': nn.Embedding(config.block_size, config.n_embd),
+            'h': nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            'ln_f': nn.LayerNorm(config.n_embd),
+        })
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
     
     def forward(self, idx, targets=None):
@@ -152,3 +160,56 @@ class GPT(nn.Module):
                     sd[k].copy_(sd_hf[k])
 
         return model
+
+
+# ----------
+num_return_sequences = 5
+max_length = 30
+
+model = GPT.from_pretrained('gpt2')
+model.eval()
+model.to(device)
+
+# prefix tokens
+import tiktoken
+enc = tiktoken.get_encoding('gpt2')
+tokens = enc.encode("Hello, I'm a language model.")
+tokens = torch.tensor(tokens, dtype=torch.long) # (8,)
+tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1) # (5,8)
+x = tokens.to(device)
+
+# Generate
+torch.manual_seed(42)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed(42)
+elif device == 'mps':
+    # Apple Silicon MPS uses torch.manual_seed
+    pass
+
+sample_rng = torch.Generator(device=device)
+sample_rng.manual_seed(42)
+
+while x.size(1) < max_length:
+    # forward the model to get the logits
+    with torch.no_grad():
+        logits, loss = model(x) # (B, T, vocab_size)
+        # take the logits at the last position
+        logits = logits[:, -1, :] # (B, vocab_size)
+        # get the probabilities
+        probs = F.softmax(logits, dim=-1)
+        # do top-k sampling of 50 (huggingface pipeline default)
+        # topk_probs here becomes (5, 50), topk_indices is (5, 50)
+        topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
+        # select a token from the top-k probabilities
+        # note: multinomial does not demand the input to sum to 1
+        ix = torch.multinomial(topk_probs, 1, generator=sample_rng) # (B, 1)
+        # gather the corresponding indices
+        xcol = torch.gather(topk_indices, -1, ix) # (B, 1)
+        # append to the sequence
+        x = torch.cat((x, xcol), dim=1)
+
+# print the generated text
+for i in range(num_return_sequences):
+    tokens = x[i, : max_length].tolist()
+    decoded = enc.decode(tokens)
+    print(">", decoded)
