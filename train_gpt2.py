@@ -163,17 +163,38 @@ elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
     device = 'mps'
 print("using device:", device)
 
-num_return_sequences = 5
-max_length = 30
-
-# model = GPT.from_pretrained('gpt2')
-model = GPT(GPTConfig())
-model.eval()
-model.to(device)
-
-# prefix tokens
+# get a data batch
 import tiktoken
 enc = tiktoken.get_encoding('gpt2')
+with open('input.txt', 'r') as f:
+    text = f.read()
+text = text[:1000]
+tokens = enc.encode(text)
+B, T = 4, 32
+buf = torch.tensor(tokens[:B*T + 1])
+buf = buf.to(device)
+x = buf[:-1].view(B, T)
+y = buf[1:].view(B, T)
+
+# get logits
+model = GPT(GPTConfig())
+model.to(device)
+
+# optimize
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+for i in range(50):
+    optimizer.zero_grad()
+    logits, loss = model(x, y)
+    loss.backward()
+    optimizer.step()
+    print(f"Step {i}, loss: {loss.item()}")
+
+import sys; sys.exit()
+
+# prefix tokens
+model.eval()
+num_return_sequences = 5
+max_length = 30
 tokens = enc.encode("Hello, I'm a language model.")
 tokens = torch.tensor(tokens, dtype=torch.long) # (8,)
 tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1) # (5,8)
