@@ -23,3 +23,14 @@ Following [Let's reproduce GPT-2 (124M)](https://youtu.be/l8pRSuU81PU?si=ggCyvU2
 9. **正交向量空间设计**：为什么词向量（wte）和位置向量（wpe）可以直接相加？难道不会把信息混成一团吗？
 10. **wte sharing (权重共享)**：什么是 wte sharing（权重绑定/共享）？它有什么作用？
 11. **LayerNorm 梯度稀释陷阱**：既然模型中经过了 LayerNorm，为什么在深层网络中还会发生方差爆炸和训练崩溃？
+12. **nn.Embedding 的物理本质**：`nn.Embedding` 在物理上到底是什么操作？它和 Linear 有什么区别？
+13. **残差连接（Residual Connection）**：残差连接到底解决了什么问题？梯度高速公路原理。
+14. **LayerNorm 的数学本质**：LayerNorm 在数学上到底做了什么？LayerNorm vs BatchNorm。
+15. **Tokenization 与 BPE**：tiktoken 是怎么把文字变成数字的？字符级 vs 词级 vs BPE 子词。
+16. **Tensor 与 .to(device)**：张量是什么？设备转移在物理上发生了什么？CPU/CUDA/MPS 对比。
+17. **Cross Entropy Loss**：Cross Entropy Loss 到底在计算什么？为什么初始 Loss ≈ log(vocab_size)？
+18. **Logits 与 Softmax**：Logits 是什么？它和概率有什么区别？为什么不直接输出概率？
+19. **梯度下降与反向传播**：模型是怎么"学习"的？训练循环四步骤的物理含义。
+20. **AdamW 优化器**：为什么选 AdamW 而不是 SGD？动量、自适应学习率、解耦权重衰减。
+21. **_init_weights 完整原理**：0.02 这个魔术数字的来龙去脉，NANOGPT_SCALE_INIT 残差缩放机制。
+
