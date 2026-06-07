@@ -613,3 +613,39 @@ if hasattr(module, 'NANOGPT_SCALE_INIT'):
 * 所有的"学习"应该由权重矩阵通过矩阵乘法完成，偏置只是微调。
 * 零偏置保证模型在初始化时的行为是对称且中性的。
 
+---
+
+### 22. Kernel Fusion（算子融合）是什么？为什么它能大幅加速 GPU 计算？
+
+**Kernel Fusion 就是把多个本来要分开执行的 GPU 运算，合并成一个运算一次性完成，从而大幅减少显存的读写次数。**
+
+#### 1. 什么是 GPU Kernel？
+在 GPU 编程中，**Kernel** 是一个发送给 GPU 执行的小任务函数。每次你在 PyTorch 里写一个操作（加法、乘法、GELU、LayerNorm……），PyTorch 都会向 GPU 提交一个独立的 Kernel。
+
+#### 2. 没有融合时的瓶颈：显存搬运
+以 MLP 的前向传播为例（`矩阵乘法 → GELU → 矩阵乘法`），没有融合时 GPU 的工作流程为：
+1. Kernel 1 执行矩阵乘法 → 把结果**写回显存 (HBM)**
+2. Kernel 2 从显存**读取**结果 → 执行 GELU → 把结果**写回显存**
+3. Kernel 3 从显存**读取**结果 → 执行矩阵乘法 → 把结果**写回显存**
+
+每一步之间，数据都要在 GPU 的计算单元和显存 (HBM) 之间来回搬运。而显存的读写速度比计算速度**慢几十到几百倍**。GPU 大部分时间都在等数据搬运，而不是在算东西。这被称为**访存瓶颈（Memory-Bound）**。
+
+#### 3. 融合之后发生了什么？
+Kernel Fusion 把相邻的多个操作**焊成一个大 Kernel**：
+* 矩阵乘法的结果**不写回显存**，直接在 GPU 片上高速缓存（SRAM）中传给 GELU。
+* GELU 算完也不写回显存，直接传给下一步。
+* **只在最终把最终结果写回显存一次**。
+
+效果：显存读写次数从 6 次（3 读 + 3 写）降到 2 次（1 读 + 1 写），速度大幅提升。
+
+#### 4. `torch.compile` 与自动 Kernel Fusion
+`torch.compile(model)` 做的核心工作之一就是**自动 Kernel Fusion**：
+1. PyTorch 先记录整个模型的计算图（哪些操作连接哪些操作）。
+2. 分析哪些相邻操作可以融合（如 LayerNorm 内部的减均值 + 除标准差 + 乘 gamma + 加 beta）。
+3. 自动生成融合后的高效 GPU Kernel 代码。
+4. 用融合后的版本替代原来的逐步执行。
+
+这就是为什么 `torch.compile` 的第一步会非常慢（它在"编译"和优化计算图），但后续每一步都会显著加速。
+
+#### 5. Flash Attention：最极致的手动 Kernel Fusion 案例
+Flash Attention 把自注意力计算中的 5 个操作（`Q @ K^T → Scale → Mask → Softmax → @ V`）全部融合成一个 Kernel，在 GPU SRAM 上分块完成所有计算，完全不在显存中创建那个巨大的 `(T, T)` 中间矩阵。这是 Kernel Fusion 思想的极致体现。
