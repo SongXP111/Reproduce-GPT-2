@@ -204,6 +204,9 @@ class DataLoderLite:
 
 # ----------
 # Device detection: supports CUDA, Apple Silicon (MPS), and CPU
+
+import time
+
 device = 'cpu'
 if torch.cuda.is_available():
     device = 'cuda'
@@ -212,22 +215,35 @@ elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
 print("using device:", device)
 
 # get a data batch
-train_loader = DataLoderLite(B=4, T=32)
+train_loader = DataLoderLite(B=16, T=1024)
+
+torch.set_float32_matmul_precision('high')
 
 # get logits
 model = GPT(GPTConfig())
 model.to(device)
+model = torch.compile(model)
 
 # optimize
 optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
 for i in range(50):
-    optimizer.zero_grad()
+    t0 = time.time()
     x, y = train_loader.next_batch()
     x, y = x.to(device), y.to(device)
+    optimizer.zero_grad()
+    # with torch.autocast(device_type=device, dtype=torch.bfloat16):
+    #     logits, loss = model(x, y)
     logits, loss = model(x, y)
     loss.backward()
     optimizer.step()
-    print(f"Step {i}, loss: {loss.item()}")
+    if device == 'cuda':
+        torch.cuda.synchronize()
+    elif device == 'mps':
+        torch.mps.synchronize()
+    t1 = time.time()
+    dt = (t1 - t0) * 1000 # ms
+    tokens_per_sec = (train_loader.B * train_loader.T) / (t1 - t0) # tokens per second
+    print(f"Step {i}, loss: {loss.item()}, time: {dt} ms, {tokens_per_sec: .2f} tokens/s")
 
 import sys; sys.exit()
 
