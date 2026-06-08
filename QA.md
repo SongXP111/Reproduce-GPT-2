@@ -662,31 +662,31 @@ Flash Attention 把自注意力计算中的 5 个操作（`Q @ K^T → Scale →
 在现代 GPU 架构（如 A100, H100）上，算力（TFLOPS）的增长速度远超显存带宽（GB/s）的增长速度。
 *   **矩阵乘法（GEMM）**：是 **Compute-Bound（计算受限）**的。GPU 的 Tensor Cores 可以全速运转，利用率极高。
 *   **Element-wise 算子（Softmax, Scale, Mask, Dropout）**：是 **Memory-Bound（访存受限）**的。它们计算极简单，但每次计算都需要从慢速的 **HBM（显存）**读取数据，算完再写回 HBM，导致 GPU 核心在大部分时间都闲置着“等数据”。
-*   **标准 Self-Attention 的硬伤**：由于其公式 `Softmax(Q K^T) V` 存在中间步骤，传统的 PyTorch 实现会频繁把大小为 `(Seq_Len, Seq_Len)` 的注意力得分矩阵和概率矩阵写回 HBM 再读出，在长文本场景下导致严重的访存开销以及 $O(T^2)$ 级别的显存爆炸。
+*   **标准 Self-Attention 的硬伤**：由于其公式 `Softmax(Q * K^T) * V` 存在中间步骤，传统的 PyTorch 实现会频繁把大小为 `(Seq_Len, Seq_Len)` 的注意力得分矩阵和概率矩阵写回 HBM 再读出，在长文本场景下导致严重的访存开销以及 `O(T^2)` 级别的显存爆炸。
 
 ---
 
 #### 2. 核心设计的“三大支柱”
 
 ##### 支柱一：片上分块（Tiling）
-*   **机制**：将 $Q$、$K$、$V$ 在序列维度（Sequence Dimension）切分成小块（Blocks），使其大小恰好能装进 GPU 的片上 **SRAM（Shared Memory，速度比 HBM 快一个数量级）**。
-*   **效果**：所有局部 Attention 计算直接在 SRAM 内部完成，从始至终不在 HBM 里创建那个 `(Seq_Len, Seq_Len)` 的巨大中间矩阵，将 HBM 访存次数降到了 $O(T)$ 级别。
+*   **机制**：将 Q、K、V 在序列维度（Sequence Dimension）切分成小块（Blocks），使其大小恰好能装进 GPU 的片上 **SRAM（Shared Memory，速度比 HBM 快一个数量级）**。
+*   **效果**：所有局部 Attention 计算直接在 SRAM 内部完成，从始至终不在 HBM 里创建那个 `(Seq_Len, Seq_Len)` 的巨大中间矩阵，将 HBM 访存次数降到了 `O(T)` 级别。
 
 ##### 支柱二：在线 Softmax（Online Softmax）
-*   **数学挑战**：全局 Softmax 依赖全局最大值 $m$ 和累加和 $d$：$softmax(x_i) = \frac{e^{x_i - m}}{d}$。如果分块读入，前一个 Block 计算时无法预知后一个 Block 的数值。
+*   **数学挑战**：全局 Softmax 依赖全局最大值 m 和累加和 d：`softmax(x_i) = e^(x_i - m) / d`。如果分块读入，前一个 Block 计算时无法预知后一个 Block 的数值。
 *   **解法**：通过**动态缩放因子**进行增量修正。
-    *   在 SRAM 中维护当前行的局部最大值 $m^{(1)}$ 和分母和 $d^{(1)}$。
-    *   当读入新块时，计算新块的局部最大值 $m^{(2)}$。更新全局最大值 $m^{\text{new}} = \max(m^{(1)}, m^{(2)})$。
-    *   利用指数性质，通过乘以 $e^{m^{(1)} - m^{\text{new}}}$ 将旧的累加值和局部输出**无损地拉齐**到新标度上，得到更新后的 $d^{\text{new}}$。
+    *   在 SRAM 中维护当前行的局部最大值 m_1 和分母和 d_1。
+    *   当读入新块时，计算新块的局部最大值 m_2。更新全局最大值 `m_new = max(m_1, m_2)`。
+    *   利用指数性质，通过乘以 `e^(m_1 - m_new)` 将旧的累加值和局部输出**无损地拉齐**到新标度上，得到更新后的 d_new。
     *   遍历完序列后，其结果与全局 Softmax 数学上**完全精确等价**。
 
 ##### 支柱三：反向传播重计算（Recomputation / Activation Checkpointing）
-*   **机制**：在前向传播中，FlashAttention **不存储**任何 Softmax 概率矩阵 $P$（因为在 HBM 存 $O(T^2)$ 矩阵代价太大）。在反向传播时，利用保存在 HBM 中的输出 $O$ 以及行最大值 $m$、累加和 $d$，**在片上 SRAM 中重新计算出所需的局部 $P$ 块**。
-*   **Trade-off**：虽然增加了约 30% 的额外 FLOPs（计算开销），但由于极大地减少了读写 HBM 的带宽开销（I/O 开销），在 GPU 这种算力严重过剩的硬件上，**重计算反而比直接从显存中读存盘数据快得多**，同时将显存占用从 $O(T^2)$ 直接削减到了 $O(T)$。
+*   **机制**：在前向传播中，FlashAttention **不存储**任何 Softmax 概率矩阵 P（因为在 HBM 存 `O(T^2)` 矩阵代价太大）。在反向传播时，利用保存在 HBM 中的输出 O 以及行最大值 m、累加和 d，**在片上 SRAM 中重新计算出所需的局部 P 块**。
+*   **Trade-off**：虽然增加了约 30% 的额外 FLOPs（计算开销），但由于极大地减少了读写 HBM 的带宽开销（I/O 开销），在 GPU 这种算力严重过剩的硬件上，**重计算反而比直接从显存中读存盘数据快得多**，同时将显存占用从 `O(T^2)` 直接削减到了 `O(T)`。
 
 ---
 
-#### 3. 硬件级的演进与协同优化（FA-1 $\rightarrow$ FA-2 $\rightarrow$ FA-3）
+#### 3. 硬件级的演进与协同优化（FA-1 -> FA-2 -> FA-3）
 
 *   **FlashAttention-1（算子融合与 Tiling 奠基）**：
     *   实现了基础的 Tiling 与 Online Softmax。
@@ -694,7 +694,7 @@ Flash Attention 把自注意力计算中的 5 个操作（`Q @ K^T → Scale →
 
 *   **FlashAttention-2（最大化 Tensor Core 效率）**：
     *   **减少非矩阵乘法操作（Non-Matmul FLOPs）**：将那些无法运行在 Tensor Cores 上的操作（如 Scale, Softmax）尽量精简，将更多计算资源让给 GEMM。
-    *   **Warp 级并行重构**：优化了 GPU 线程块（Thread Block）内部的 Warp 划分。FA-1 将 $Q$ 划给不同的 Warp，$K, V$ 共享，导致 Warp 间频繁同步（Barrier）。FA-2 改为将 $Q$ 划分给 Warp，而让不同的 Warp 处理不同的列块，减少了 Warp 间的同步和通信开销。
+    *   **Warp 级并行重构**：优化了 GPU 线程块（Thread Block）内部的 Warp 划分。FA-1 将 Q 划分给不同的 Warp，K, V 共享，导致 Warp 间频繁同步（Barrier）。FA-2 改为将 Q 划分给 Warp，而让不同的 Warp 处理不同的列块，减少了 Warp 间的同步和通信开销。
     *   算力有效利用率从 FA-1 的 30% 提升至 50%~70%。
 
 *   **FlashAttention-3（Hopper 架构级异步与 FP8 适配）**：
