@@ -36,3 +36,5 @@ Following [Let's reproduce GPT-2 (124M)](https://youtu.be/l8pRSuU81PU?si=ggCyvU2
 22. **Kernel Fusion（算子融合）**：算子融合是什么？为什么它能大幅加速 GPU 计算？
 23. **FlashAttention 加速机制**：FlashAttention 是什么？我需要理解到什么程度？
 24. **词表对齐优化**：为什么我们要把词表大小 vocab_size 从 50257 改为 50304？
+25. **AdamW 优化器超参**：AdamW 优化器中 betas=(0.9, 0.95) 和 eps=1e-8 的物理含义与作用是什么？
+26. **梯度裁剪（Gradient Clipping）**：clip_grad_norm_ 的底层原理与作用是什么？如何防止训练崩溃。
