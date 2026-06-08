@@ -244,7 +244,7 @@ for i in range(50):
     t1 = time.time()
     dt = (t1 - t0) * 1000 # ms
     tokens_per_sec = (train_loader.B * train_loader.T) / (t1 - t0) # tokens per second
-    print(f"Step {i}, loss: {loss.item()}, time: {dt} ms, {tokens_per_sec: .2f} tokens/s")
+    print(f"Step {i}, loss: {loss.item()}, grad_norm: {norm.item()}, time: {dt} ms, {tokens_per_sec: .2f} tokens/s")
 
 import sys; sys.exit()
 
