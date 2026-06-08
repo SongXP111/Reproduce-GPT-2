@@ -1,7 +1,11 @@
 from dataclasses import dataclass
+import math
+import inspect
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+
+master_process = True
 
 
 class CausalSelfAttention(nn.Module):

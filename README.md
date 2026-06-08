@@ -39,3 +39,4 @@ Following [Let's reproduce GPT-2 (124M)](https://youtu.be/l8pRSuU81PU?si=ggCyvU2
 25. **AdamW 优化器超参**：AdamW 优化器中 betas=(0.9, 0.95) 和 eps=1e-8 的物理含义与作用是什么？
 26. **梯度裁剪（Gradient Clipping）**：clip_grad_norm_ 的底层原理与作用是什么？如何防止训练崩溃。
 27. **线性预热与余弦衰减**：学习率调度器中的线性预热（Linear Warmup）与余弦衰减（Cosine Decay）的物理原理与作用是什么？
+28. **优化器分组与融合**：configure_optimizers 函数的作用是什么？为什么要做参数衰减分组与融合优化器优化？
