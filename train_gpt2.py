@@ -245,9 +245,18 @@ print("using device:", device)
 
 device_type = "cuda" if device.startswith("cuda") else "cpu"
 
+# gradient accumulation
+total_batch_size = 524288 # 0.5M tokens
+B = 16
+T = 1024
+assert total_batch_size % (B * T) == 0
+grad_accum_steps = total_batch_size // (B * T)
+if master_process:
+    print(f"total desired batch size: {total_batch_size}")
+    print(f"=> calculated gradient accumulation steps: {grad_accum_steps}")
 
 # get a data batch
-train_loader = DataLoderLite(B=16, T=1024)
+train_loader = DataLoderLite(B=B, T=T)
 
 torch.set_float32_matmul_precision('high')
 
@@ -280,13 +289,15 @@ optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, dev
 # training loop
 for step in range(max_steps):
     t0 = time.time()
-    x, y = train_loader.next_batch()
-    x, y = x.to(device), y.to(device)
     optimizer.zero_grad()
-    # with torch.autocast(device_type=device, dtype=torch.bfloat16):
-    #     logits, loss = model(x, y)
-    logits, loss = model(x, y)
-    loss.backward()
+    for micro_step in range(grad_accum_steps):
+        x, y = train_loader.next_batch()
+        x, y = x.to(device), y.to(device)
+        # with torch.autocast(device_type=device, dtype=torch.bfloat16):
+        #     logits, loss = model(x, y)
+        logits, loss = model(x, y)
+        loss = loss / grad_accum_steps # normalize the loss
+        loss.backward()
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     # determine and set the learning rate for this iteration
     lr = get_lr(step)
