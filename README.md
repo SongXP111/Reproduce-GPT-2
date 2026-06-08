@@ -33,4 +33,6 @@ Following [Let's reproduce GPT-2 (124M)](https://youtu.be/l8pRSuU81PU?si=ggCyvU2
 19. **梯度下降与反向传播**：模型是怎么"学习"的？训练循环四步骤的物理含义。
 20. **AdamW 优化器**：为什么选 AdamW 而不是 SGD？动量、自适应学习率、解耦权重衰减。
 21. **_init_weights 完整原理**：0.02 这个魔术数字的来龙去脉，NANOGPT_SCALE_INIT 残差缩放机制。
+22. **Kernel Fusion（算子融合）**：算子融合是什么？为什么它能大幅加速 GPU 计算？
+23. **FlashAttention 加速机制**：FlashAttention 是什么？它的底层原理和硬件加速机制是什么？
 
