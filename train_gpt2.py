@@ -290,6 +290,7 @@ optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, dev
 for step in range(max_steps):
     t0 = time.time()
     optimizer.zero_grad()
+    loss_accum = 0.0
     for micro_step in range(grad_accum_steps):
         x, y = train_loader.next_batch()
         x, y = x.to(device), y.to(device)
@@ -297,6 +298,7 @@ for step in range(max_steps):
         #     logits, loss = model(x, y)
         logits, loss = model(x, y)
         loss = loss / grad_accum_steps # normalize the loss
+        loss_accum += loss
         loss.backward()
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     # determine and set the learning rate for this iteration
@@ -310,8 +312,9 @@ for step in range(max_steps):
         torch.mps.synchronize()
     t1 = time.time()
     dt = (t1 - t0) # second
-    tokens_per_sec = (train_loader.B * train_loader.T) / (t1 - t0) # tokens per second
-    print(f"Step {step}, loss: {loss.item()}, lr: {lr}, grad_norm: {norm.item()}, time: {dt} s, {tokens_per_sec: .2f} tokens/s")
+    tokens_processed = train_loader.B * train_loader.T * grad_accum_steps
+    tokens_per_sec = tokens_processed / dt # tokens per second
+    print(f"Step {step}, loss: {loss_accum.item():.4f}, lr: {lr:.4e}, grad_norm: {norm.item():.4e}, time: {dt:.2f} s, {tokens_per_sec: .2f} tokens/s")
 
 import sys; sys.exit()
 
