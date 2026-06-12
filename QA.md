@@ -949,3 +949,33 @@ AdamW 维护了两个历史梯度状态，分别由 betas 的两个值控制：
 2.  每个进程独立地在自己的 GPU 上完成前向传播和反向传播。
 3.  在 `loss.backward()` 完成后，PyTorch DDP 会**自动触发一次跨所有 GPU 的 AllReduce 操作**，将所有进程上的梯度平均化。
 4.  每个进程用这个平均后的一致梯度，各自独立地执行 `optimizer.step()` 更新参数。由于梯度完全一致，所有卡上的模型参数在每一步都保持完全同步。
+
+---
+
+### 32. 大模型工程中，AI Infra 为什么需要重点关注 FineWeb 数据流与 HellaSwag 评测的底层实现？
+
+#### 1. FineWeb 数据流：解决大规模训练的 I/O 与显存瓶颈
+
+大模型预训练动辄消耗数千亿甚至数万亿的 Token，数据读取和传输极易成为 GPU 的速度瓶颈：
+*   **离线 Tokenization & 二进制分片**：训练时严禁实时用 CPU 进行 Tokenize。应预先利用多进程（如 `multiprocessing`）将原始文本转为 Token，分片保存为二进制 `.npy` / `.bin` 文件。
+*   **`uint16` 存储优化**：GPT-2 的词表大小是 `50,257`（对齐到 `50,304`），远小于 $2^{16}=65,536$。使用 `uint16`（2 字节）而不是默认的 `int64`（8 字节）存储 Token，可以直接**减少 75% 的磁盘占用和 I/O 传输带宽**。
+*   **内存映射（Memory Mapping）**：通过 `np.memmap` 动态加载 Shard，仅在计算需要时由操作系统按页（Page）调入物理内存，避免在加载超大文件时产生 OOM（内存溢出）。
+*   **多卡数据切分与 Prefetch**：在分布式训练中，各卡通过 Rank 和 World Size 动态偏移读取互不重叠的数据段，并使用异步 Prefetch 在 GPU 运算时提前加载下一个数据分片，确保 GPU 始终处于满载计算状态。
+
+#### 2. HellaSwag 评测：动态 Batch、Loss 掩码与多卡指标规约
+
+HellaSwag 是一种常识推理的多项选择评估。它在工程上与标准的预训练存在巨大的差异：
+*   **多项选择转为因果建模（Causal LM）**：
+    每道题由 1 个上下文（Context）和 4 个候选结尾（Endings）组成。AI Infra 需要将它们拼接为 4 条独立序列，作为一个大小为 `4` 的 Batch 送入模型：
+    $$\text{Shape: } (4, \text{max\_len})$$
+*   **双重错位（Shift）与掩码（Masking）**：
+    由于候选结尾长度不一，拼接时需用 `0` 补齐（Padding），并构建 `mask` Tensor（仅 Ending 对应的 Token 位置为 1，Context 和 Padding 位置为 0）。在计算 Logits 时，必须对 Logits、Labels 以及 Mask 同时进行 Shift 错位：
+    ```python
+    shift_logits = logits[..., :-1, :]
+    shift_tokens = tokens[..., 1:]
+    shift_mask = mask[..., 1:]
+    ```
+    计算 Cross Entropy 后，乘以 `shift_mask` 并取均值，得到 4 个结尾各自的平均 Loss。Loss 最小（即最合理）的 Ending 索引与真实 Label 比对，算作预测正确性。
+*   **分布式评估通信规约（All-Reduce）**：
+    10,042 条测试样本会被均匀分发到所有的 GPU Rank 上并行计算以提升效率。评测结束后，各 Rank 的局部 `correct_count` 和 `total_count` 必须通过分布式通信原语（如 `dist.all_reduce(op=ReduceOp.SUM)`）汇总到主节点，计算出全局准确率，并利用 `dist.barrier()` 保证快卡不会提前进入下一轮训练导致多卡进程失联。
+

@@ -43,3 +43,5 @@ Following [Let's reproduce GPT-2 (124M)](https://youtu.be/l8pRSuU81PU?si=ggCyvU2
 29. **梯度累积与分布式通信**：梯度累积（Gradient Accumulation）在 AI Infra 视角的底层设计与要点是什么？
 30. **梯度累积与 Loss 归一化**：梯度累积时，为什么要在 backward() 之前执行 loss = loss / grad_accum_steps？
 31. **DDP 分布式数据并行初始化**：DDP 初始化代码的底层原理是什么？RANK、LOCAL_RANK、WORLD_SIZE 分别代表什么？
+32. **AI Infra 与数据集/评测设计**：大模型工程中，AI Infra 为什么需要重点关注 FineWeb 数据流与 HellaSwag 评测的底层实现？
+
