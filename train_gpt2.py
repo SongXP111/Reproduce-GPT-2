@@ -361,6 +361,35 @@ for step in range(max_steps):
         if master_process:
             print(f"validation loss: {val_loss_accum.item():.4f}")
 
+    # once in a while generate from the model (except step 0, which is noise)
+    if (step > 0 and step % 100 == 0) or (step == max_steps - 1):
+        model.eval()
+        num_return_sequences = 4
+        max_length = 32
+        enc = tiktoken.get_encoding('gpt2')
+        tokens = enc.encode("Hello, I'm a language model,")
+        tokens = torch.tensor(tokens, dtype=torch.long)
+        tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
+        xgen = tokens.to(device)
+        sample_rng = torch.Generator(device=device)
+        sample_rng.manual_seed(42 + step)
+        while xgen.size(1) < max_length:
+            with torch.no_grad():
+                logits, loss = model(xgen)
+                logits = logits[:, -1, :]
+                probs = F.softmax(logits, dim=-1)
+                topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
+                ix = torch.multinomial(topk_probs, 1, generator=sample_rng)
+                xcol = torch.gather(topk_indices, -1, ix)
+                xgen = torch.cat((xgen, xcol), dim=1)
+        # print the generated text
+        for i in range(num_return_sequences):
+            tokens = xgen[i, :max_length].tolist()
+            decoded = enc.decode(tokens)
+            if master_process:
+                print(f"sample {i}: {decoded}")
+
+    # normal training step
     model.train()
     optimizer.zero_grad()
     loss_accum = 0.0
@@ -399,43 +428,3 @@ for step in range(max_steps):
 
 if ddp:
     destroy_process_group()
-
-import sys; sys.exit()
-
-# prefix tokens
-model.eval()
-num_return_sequences = 5
-max_length = 30
-tokens = enc.encode("Hello, I'm a language model.")
-tokens = torch.tensor(tokens, dtype=torch.long) # (8,)
-tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1) # (5,8)
-x = tokens.to(device)
-
-# Generate
-sample_rng = torch.Generator(device=device)
-sample_rng.manual_seed(42)
-
-while x.size(1) < max_length:
-    # forward the model to get the logits
-    with torch.no_grad():
-        logits, loss = model(x) # (B, T, vocab_size)
-        # take the logits at the last position
-        logits = logits[:, -1, :] # (B, vocab_size)
-        # get the probabilities
-        probs = F.softmax(logits, dim=-1)
-        # do top-k sampling of 50 (huggingface pipeline default)
-        # topk_probs here becomes (5, 50), topk_indices is (5, 50)
-        topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
-        # select a token from the top-k probabilities
-        # note: multinomial does not demand the input to sum to 1
-        ix = torch.multinomial(topk_probs, 1, generator=sample_rng) # (B, 1)
-        # gather the corresponding indices
-        xcol = torch.gather(topk_indices, -1, ix) # (B, 1)
-        # append to the sequence
-        x = torch.cat((x, xcol), dim=1)
-
-# print the generated text
-for i in range(num_return_sequences):
-    tokens = x[i, : max_length].tolist()
-    decoded = enc.decode(tokens)
-    print(">", decoded)
