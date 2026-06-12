@@ -911,3 +911,41 @@ AdamW 维护了两个历史梯度状态，分别由 betas 的两个值控制：
 #### 3. 总结
 
 在每个微批次计算出局部 Loss 后，通过 `loss = loss / grad_accum_steps` 预先将 Loss 缩小 N 倍，对应的导数（梯度）也会被等比例缩小 N 倍。这样在循环中连续累加 N 次之后，参数中留存的总梯度便恰好等于大 Batch 的**正确全局平均梯度**。
+
+---
+
+### 31. DDP（分布式数据并行）初始化代码的底层原理是什么？RANK、LOCAL_RANK、WORLD_SIZE 分别代表什么？
+
+当我们从单卡训练扩展到多卡训练时，需要在代码中加入 DDP（Distributed Data Parallel）初始化逻辑。这段代码的设计目标是**让同一份脚本既能用 `python3` 单卡运行，也能用 `torchrun` 多卡运行，自动适配**。
+
+#### 1. 多卡训练的启动机制：torchrun 与环境变量注入
+
+当我们用 `torchrun --nproc_per_node=8 train_gpt2.py` 启动多卡训练时，PyTorch 的启动器会自动**为每张 GPU 启动一个独立的 Python 进程**，并在每个进程的系统环境变量中注入三个核心标识符：
+
+| 环境变量 | 物理含义 | 示例（8 卡单机） |
+| :--- | :--- | :--- |
+| **RANK** | 当前进程在**所有进程中的全局编号**（跨机器唯一） | 0, 1, 2, ..., 7 |
+| **LOCAL_RANK** | 当前进程在**本机内的编号**（用来绑定本机的第几张 GPU） | 0, 1, 2, ..., 7 |
+| **WORLD_SIZE** | **总共启动了多少个进程**（= 总 GPU 数） | 8 |
+
+*   在多机场景下（例如 2 台各 8 卡的机器），WORLD_SIZE = 16，RANK 范围是 0~15，而每台机器上的 LOCAL_RANK 仍然是 0~7。
+
+#### 2. DDP 模式下的关键初始化步骤
+
+*   **`init_process_group(backend='nccl')`**：NCCL（NVIDIA Collective Communications Library）是 NVIDIA 专为 GPU 间通信（如 AllReduce 梯度同步）开发的高性能底层通信库。此调用让所有进程互相握手，建立跨卡通信通道。
+*   **`device = f'cuda:{ddp_local_rank}'`**：每个进程根据自己的 LOCAL_RANK 绑定到对应的 GPU。例如进程 0 绑定 `cuda:0`，进程 3 绑定 `cuda:3`，确保每个进程独占一张卡、互不干扰。
+*   **`master_process = ddp_rank == 0`**：在多卡训练中，只有全局 RANK=0 的主进程（master process）负责打印日志、保存 Checkpoint 等 I/O 操作。其余进程只管闷头计算。如果所有进程都打印，终端会输出 8 份重复的日志，混乱不堪。
+
+#### 3. 非 DDP 模式下的兼容性兜底
+
+当你直接用 `python3 train_gpt2.py` 运行时，环境变量里没有 `RANK`，代码自动走 `else` 分支：
+*   将 `ddp_rank`, `ddp_local_rank` 设为 0，`ddp_world_size` 设为 1，`master_process` 设为 True。
+*   后续代码中所有依赖这些变量的逻辑（如梯度累积步数计算中除以 `ddp_world_size`、日志打印中判断 `master_process`）都能无缝工作，无需额外的 if/else 分叉。
+
+#### 4. DDP 训练的物理执行模型
+
+在 DDP 模式下，训练的物理执行流程为：
+1.  每个进程独立地读取不同的数据切片（通过不同的 DataLoader offset）。
+2.  每个进程独立地在自己的 GPU 上完成前向传播和反向传播。
+3.  在 `loss.backward()` 完成后，PyTorch DDP 会**自动触发一次跨所有 GPU 的 AllReduce 操作**，将所有进程上的梯度平均化。
+4.  每个进程用这个平均后的一致梯度，各自独立地执行 `optimizer.step()` 更新参数。由于梯度完全一致，所有卡上的模型参数在每一步都保持完全同步。
