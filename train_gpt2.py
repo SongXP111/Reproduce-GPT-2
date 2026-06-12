@@ -1,12 +1,20 @@
-from dataclasses import dataclass
-import math
-import inspect
-import time
 import os
+import math
+import time
+import inspect
+from dataclasses import dataclass
+
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+from torch.distributed import init_process_group, destroy_process_group
+from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.distributed as dist
+import tiktoken
+from transformers import GPT2LMHeadModel
+
+from hellaswag import render_example, iterate_examples, download
 
 
 class CausalSelfAttention(nn.Module):
@@ -131,7 +139,6 @@ class GPT(nn.Module):
     def from_pretrained(cls, model_type):
         """Loads pretrained GPT-2 model weights from huggingface"""
         assert model_type in {'gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'}
-        from transformers import GPT2LMHeadModel
         print("loading weights from pretrained gpt: %s" % model_type)
 
         # n_layer, n_head and n_embd are determined from model_type
@@ -203,8 +210,6 @@ class GPT(nn.Module):
 
 
 # ----------
-import tiktoken
-
 def load_tokens(filename):
     npt = np.load(filename)
     npt = npt.astype(np.int32) # added after video
@@ -276,10 +281,6 @@ def get_most_likely_row(tokens, mask, logits):
 
 # ----------
 # run the training loop
-from torch.distributed import init_process_group, destroy_process_group
-from torch.nn.parallel import DistributedDataParallel as DDP
-import torch.distributed as dist
-from hellaswag import render_example, iterate_examples
 
 # set up DDP (distributed data parallel).
 # torchrun command sets the env variables RANK, LOCAL_RANK, and WORLD_SIZE
@@ -412,7 +413,6 @@ for step in range(max_steps):
     # once in a while evaluate hellaswag
     if (step % 250 == 0 or last_step) and (not use_compile):
         if master_process:
-            from hellaswag import download
             download("val")
         if ddp:
             dist.barrier()
