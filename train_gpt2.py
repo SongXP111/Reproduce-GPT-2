@@ -332,7 +332,7 @@ for step in range(max_steps):
         #     logits, loss = model(x, y)
         logits, loss = model(x, y)
         loss = loss / grad_accum_steps # normalize the loss
-        loss_accum += loss
+        loss_accum += loss.detach()
         if ddp:
             # if this is not the last micro-step, skip the gradient synchronization
             # this is a common optimization for DDP training
