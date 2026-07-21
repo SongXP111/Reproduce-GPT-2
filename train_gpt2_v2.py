@@ -94,19 +94,18 @@ class CausalSelfAttention(nn.Module):
         return y
 
 
-class MLP(nn.Module):
+class SwiGLUMLP(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd)
-        self.gelu = nn.GELU(approximate='tanh')
-        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd)
-        self.NANOGPT_SCALE_INIT = 1
+        hidden_dim = int(2 * 4 * config.n_embd / 3) # approx 2.67x embedding dimension
+        self.w1 = nn.Linear(config.n_embd, hidden_dim, bias=False) # gate channel 1
+        self.w2 = nn.Linear(config.n_embd, hidden_dim, bias=False) # gate channel 2
+        self.w3 = nn.Linear(hidden_dim, config.n_embd, bias=False) # output projection
+        self.w3.NANOGPT_SCALE_INIT = 1
 
     def forward(self, x):
-        x = self.c_fc(x)
-        x = self.gelu(x)
-        x = self.c_proj(x)
-        return x
+        # F.silu is Swish activation. w1 output after activation is element-wise multiplied with w2 output (gating)
+        return self.w3(F.silu(self.w1(x)) * self.w2(x))
 
 
 class Block(nn.Module):
@@ -115,7 +114,7 @@ class Block(nn.Module):
         self.ln_1 = nn.LayerNorm(config.n_embd)
         self.attn = CausalSelfAttention(config)
         self.ln_2 = nn.LayerNorm(config.n_embd)
-        self.mlp = MLP(config)
+        self.mlp = SwiGLUMLP(config)
 
     def forward(self, x, kv_cache=None):
         x = x + self.attn(self.ln_1(x), kv_cache=kv_cache)
