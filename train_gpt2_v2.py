@@ -54,7 +54,7 @@ class CausalSelfAttention(nn.Module):
         self.register_buffer("cos", cos, persistent=False)
         self.register_buffer("sin", sin, persistent=False)
 
-    def forward(self, x):
+    def forward(self, x, kv_cache=None):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
         
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
@@ -65,11 +65,29 @@ class CausalSelfAttention(nn.Module):
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+
+        if kv_cache is not None and "k" in kv_cache:
+            start_pos = kv_cache["k"].size(2)
+        else:
+            start_pos = 0
+
         # rotate q and k by their position-dependent angles (RoPE); the attention score between
         # positions m and n then only depends on their relative distance m - n
-        q = apply_rotary_emb(q, self.cos[:T], self.sin[:T])
-        k = apply_rotary_emb(k, self.cos[:T], self.sin[:T])
-        y = F.scaled_dot_product_attention(q, k, v, is_causal=True) # flash attention
+        q = apply_rotary_emb(q, self.cos[start_pos : start_pos + T], self.sin[start_pos : start_pos + T])
+        k = apply_rotary_emb(k, self.cos[start_pos : start_pos + T], self.sin[start_pos : start_pos + T])
+
+        if kv_cache is not None:
+            if "k" in kv_cache and "v" in kv_cache:
+                # fetch past_k, past_v stored in previous steps and concatenate with current k, v along sequence dimension (T)
+                past_k, past_v = kv_cache["k"], kv_cache["v"]
+                k = torch.cat([past_k, k], dim=2)
+                v = torch.cat([past_v, v], dim=2)
+            # save concatenated k, v back into kv_cache for the next step
+            kv_cache["k"] = k
+            kv_cache["v"] = v
+
+        is_causal = (T == k.size(2))
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=is_causal) # flash attention
         y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
         # output projection
         y = self.c_proj(y)
@@ -99,8 +117,8 @@ class Block(nn.Module):
         self.ln_2 = nn.LayerNorm(config.n_embd)
         self.mlp = MLP(config)
 
-    def forward(self, x):
-        x = x + self.attn(self.ln_1(x))
+    def forward(self, x, kv_cache=None):
+        x = x + self.attn(self.ln_1(x), kv_cache=kv_cache)
         x = x + self.mlp(self.ln_2(x))
         return x
 
@@ -142,15 +160,20 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
     
-    def forward(self, idx, targets=None):
+    def forward(self, idx, targets=None, kv_cache=None):
         # idx is of shape (B, T)
         B, T = idx.size()
-        assert T <= self.config.block_size, f"Cannot forward sequence of length {T}, block size is only {self.config.block_size}"
+        if kv_cache is not None:
+            past_len = kv_cache[0]["k"].size(2) if (len(kv_cache) > 0 and "k" in kv_cache[0]) else 0
+            assert past_len + T <= self.config.block_size, f"Cannot forward sequence of length {past_len + T}, block size is only {self.config.block_size}"
+        else:
+            assert T <= self.config.block_size, f"Cannot forward sequence of length {T}, block size is only {self.config.block_size}"
         # forward the token embeddings; positions are encoded by RoPE inside the attention layers
         x = self.transformer.wte(idx) # token embeddings of shape (B, T, n_embd)
         # forward the blocks of the transformer
-        for block in self.transformer.h:
-            x = block(x)
+        for i, block in enumerate(self.transformer.h):
+            layer_kv_cache = kv_cache[i] if kv_cache is not None else None
+            x = block(x, kv_cache=layer_kv_cache)
         # forward the final layernorm and the classifier
         x = self.transformer.ln_f(x)
         logits = self.lm_head(x) # (B, T, vocab_size)
@@ -484,25 +507,32 @@ for step in range(max_steps):
         xgen = tokens.to(device)
         sample_rng = torch.Generator(device=device)
         sample_rng.manual_seed(42 + ddp_rank)
+        
+        # initialize KV cache for generation
+        kv_cache = [{} for _ in range(raw_model.config.n_layer)]
+        # prefill prompt tokens
+        with torch.no_grad():
+            with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                logits, loss = model(xgen, kv_cache=kv_cache) # (B, T_prompt, vocab_size)
+
         while xgen.size(1) < max_length:
-            # forward the model to get the logits
+            # take the logits at the last position
+            logits_last = logits[:, -1, :] # (B, vocab_size)
+            # get the probabilities
+            probs = F.softmax(logits_last, dim=-1)
+            # do top-k sampling of 50 (huggingface pipeline default)
+            topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
+            # select a token from the top-k probabilities
+            # note: multinomial does not demand the input to sum to 1
+            ix = torch.multinomial(topk_probs, 1, generator=sample_rng) # (B, 1)
+            # gather the corresponding indices
+            xcol = torch.gather(topk_indices, -1, ix) # (B, 1)
+            # append to the sequence
+            xgen = torch.cat((xgen, xcol), dim=1)
+            # forward only the latest token (length 1) with KV Cache
             with torch.no_grad():
                 with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-                    logits, loss = model(xgen) # (B, T, vocab_size)
-                # take the logits at the last position
-                logits = logits[:, -1, :] # (B, vocab_size)
-                # get the probabilities
-                probs = F.softmax(logits, dim=-1)
-                # do top-k sampling of 50 (huggingface pipeline default)
-                # topk_probs here becomes (5, 50), topk_indices is (5, 50)
-                topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
-                # select a token from the top-k probabilities
-                # note: multinomial does not demand the input to sum to 1
-                ix = torch.multinomial(topk_probs, 1, generator=sample_rng) # (B, 1)
-                # gather the corresponding indices
-                xcol = torch.gather(topk_indices, -1, ix) # (B, 1)
-                # append to the sequence
-                xgen = torch.cat((xgen, xcol), dim=1)
+                    logits, loss = model(xcol, kv_cache=kv_cache)
         # print the generated text
         for i in range(num_return_sequences):
             tokens = xgen[i, :max_length].tolist()
